@@ -3,6 +3,7 @@ import {DataType} from './definition';
 import {BuffaloZclOptions, StructuredIndicatorType, StructuredSelector, ZclArray} from './tstype';
 import * as Utils from './utils';
 import Debug from "debug";
+import manufacturerCode from './definition/manufacturerCode';
 
 const debug = {
     info: Debug('zigbee-herdsman:controller:buffaloZcl'),
@@ -114,6 +115,24 @@ interface GdpAttributeReport {
     manufacturerCode: number;
     clusterID: number;
     attributes: KeyValue;
+}
+
+interface GdpWriteAttributes {
+    commandID: number;
+    options: number;
+    manufacturerCode: number;
+    writeClusters: GdpWriteClusterRecord[];
+}
+
+interface GdpWriteClusterRecord {
+    clusterID: number;
+    writeAttributes: GdpWriteAttributeRecord[];
+}
+
+interface GdpWriteAttributeRecord {
+    attributeID: number;
+    dataType: number;
+    value: any;
 }
 
 interface ExtensionFieldSet {
@@ -422,7 +441,7 @@ class BuffaloZcl extends Buffalo {
         }
     }
 
-    private writeGdpFrame(value: GdpCommissioningReply | GdpChannelConfiguration | GdpCustomReply): void{
+    private writeGdpFrame(value: GdpCommissioningReply | GdpChannelConfiguration | GdpCustomReply | GdpWriteAttributes): void{
         if (value.commandID == 0xF0) { // Commissioning Reply
             const v = <GdpCommissioningReply> value;
 
@@ -458,6 +477,51 @@ class BuffaloZcl extends Buffalo {
             if (hasFrameCounter) {
                 this.writeUInt32(v.frameCounter);
             }
+        } else if (value.commandID == 0xF1) { // Write attributes
+            const v = <GdpWriteAttributes> value;
+
+            const multiRecord = v.options & (1 << 0);
+            const manufacturerPresent = v.options & (1 << 1);
+
+            var clusterRecords: BuffaloZcl[] = [];
+
+            v.writeClusters.forEach((cluster) => {
+                const clusterRecord = new BuffaloZcl(Buffer.alloc(255));
+                
+                var attrs: BuffaloZcl[] = [];
+
+                cluster.writeAttributes.forEach((attribute) => {
+                    const attr = new BuffaloZcl(Buffer.alloc(20));
+                    attr.writeUInt16(attribute.attributeID);
+                    attr.writeUInt8(attribute.dataType);
+                    attr.write(DataType[attribute.dataType], attribute.value, null);
+                    attrs.push(attr);
+                });
+                
+                const attrListLength = attrs.reduce((sum, attr) => attr.getPosition(), 0);
+
+                clusterRecord.writeUInt16(cluster.clusterID);
+                clusterRecord.writeUInt8(attrListLength);
+                attrs.forEach((attr) => {
+                    clusterRecord.write(undefined, attr.getWritten(), null);
+                });
+
+                clusterRecords.push(clusterRecord);
+            });
+
+            const length = 1 + (manufacturerPresent ? 2 : 0) +
+                clusterRecords.reduce((sum, cluster) => cluster.getPosition(), 0);
+            
+            this.writeUInt8(length);
+            this.writeUInt8(v.options);
+
+            if(manufacturerPresent) {
+                this.writeUInt16(v.manufacturerCode);
+            }
+
+            clusterRecords.forEach((cluster) => {
+                this.write(undefined, cluster.getWritten(), null);
+            });
         } else if (value.commandID == 0xF3) { // Channel configuration
             const v = <GdpChannelConfiguration> value;
             this.writeUInt8(1);
